@@ -113,6 +113,10 @@ class GQAAttentionBase {
     kv_quant_enabled_ = (k_quant_type_ != KVQuantizationType::NONE);
 
     disable_gqa_flash_ = ParseEnvironmentVariableWithDefault<bool>("ORT_GQA_DISABLE_FLASH_ATTENTION", false);
+    // Experiment only: which path fp16 caches take where MLAS has fp16 GEMMs (ARM64 with fp16 arithmetic).
+    // 0 = per-head MLAS HGEMM + fp16 softmax (default, as on main), 1 = grouped kernel with fp32 tiles,
+    // 2 = per-head path with Q/K/V widened to fp32 (the path x64 takes on main).
+    exp_fp16_path_ = ParseEnvironmentVariableWithDefault<int>("ORT_GQA_EXP_FP16_PATH", 0);
 
     SetupMlasBackendKernelSelectorFromConfigOptions(mlas_backend_kernel_selector_config_, info.GetConfigOptions());
   }
@@ -134,6 +138,7 @@ class GQAAttentionBase {
   int kv_cache_bit_width_;
   bool kv_quant_enabled_;
   bool disable_gqa_flash_;
+  int exp_fp16_path_ = 0;
 
   // Resolves the per-batch geometry of one step from seqlens_k (total length - 1) and the step type:
   //   past_seqlen:        past rows copied from the past cache into the present cache,
@@ -229,7 +234,8 @@ class GQAAttentionBase {
     }
 
     // Compute the attention score.
-    bool gqa_mlas_supported = MlasGQASupported<T>(CblasNoTrans, CblasTrans) &&
+    bool gqa_mlas_supported = (std::is_same_v<T, float> || exp_fp16_path_ == 0) &&
+                              MlasGQASupported<T>(CblasNoTrans, CblasTrans) &&
                               MlasGQASupported<T>(CblasNoTrans, CblasNoTrans);
     size_t bytes = SafeInt<size_t>(batch_size) * num_heads_ * sequence_length * seqlen_present_kv_cache * (gqa_mlas_supported ? sizeof(T) : sizeof(float));
     auto attention_probs = allocator->Alloc(bytes);
@@ -1381,7 +1387,8 @@ class GQAAttentionBase {
     if constexpr (std::is_same_v<T, MLFloat16>) {
       // Where MLAS has fp16 GEMMs (ARM64 with fp16 arithmetic), the per-head path keeps fp16 caches in fp16, which is
       // faster there than the grouped kernel's fp32 tiles, though less accurate.
-      if (MlasGQASupported<T>(CblasNoTrans, CblasTrans) && MlasGQASupported<T>(CblasNoTrans, CblasNoTrans)) {
+      if (exp_fp16_path_ != 1 &&
+          MlasGQASupported<T>(CblasNoTrans, CblasTrans) && MlasGQASupported<T>(CblasNoTrans, CblasNoTrans)) {
         return false;
       }
     }
