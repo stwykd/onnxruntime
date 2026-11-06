@@ -789,6 +789,8 @@ else()
             ${MLAS_SRC_DIR}/halfgemm_kernel_neon_fp16.cpp
             ${MLAS_SRC_DIR}/softmax_kernel_neon_fp16.cpp
             ${MLAS_SRC_DIR}/eltwise_kernel_neon_fp16.cpp
+            ${MLAS_SRC_DIR}/halfattn_kernel_neon_fp16.cpp
+            ${MLAS_SRC_DIR}/halfattn_kernel_neon_fhm.cpp
             ${MLAS_SRC_DIR}/erf_neon_fp16.h
             ${MLAS_SRC_DIR}/erf_neon_fp16.cpp
             ${MLAS_SRC_DIR}/gelu_neon_fp16.h
@@ -815,6 +817,8 @@ else()
           set_source_files_properties(${MLAS_SRC_DIR}/halfgemm_kernel_neon_fp16.cpp PROPERTIES COMPILE_FLAGS " -march=armv8.2-a+fp16 ")
           set_source_files_properties(${MLAS_SRC_DIR}/softmax_kernel_neon_fp16.cpp PROPERTIES COMPILE_FLAGS " -march=armv8.2-a+fp16 ")
           set_source_files_properties(${MLAS_SRC_DIR}/eltwise_kernel_neon_fp16.cpp PROPERTIES COMPILE_FLAGS " -march=armv8.2-a+fp16 ")
+          set_source_files_properties(${MLAS_SRC_DIR}/halfattn_kernel_neon_fp16.cpp PROPERTIES COMPILE_FLAGS " -march=armv8.2-a+fp16 ")
+          set_source_files_properties(${MLAS_SRC_DIR}/halfattn_kernel_neon_fhm.cpp PROPERTIES COMPILE_FLAGS " -march=armv8.2-a+fp16+fp16fml ")
           if (onnxruntime_USE_ARM_NEON_NCHWC)
             set_source_files_properties(${MLAS_SRC_DIR}/aarch64/SconvDepthwiseKernelNeonBf16.S PROPERTIES COMPILE_FLAGS " -march=armv8.2-a+bf16 ")
             set_source_files_properties(${MLAS_SRC_DIR}/aarch64/SconvKernelNeonBf16.S PROPERTIES COMPILE_FLAGS " -march=armv8.2-a+bf16 ")

@@ -117,6 +117,9 @@ class GQAAttentionBase {
     // 0 = per-head MLAS HGEMM + fp16 softmax (default, as on main), 1 = grouped kernel with fp32 tiles,
     // 2 = per-head path with Q/K/V widened to fp32 (the path x64 takes on main).
     exp_fp16_path_ = ParseEnvironmentVariableWithDefault<int>("ORT_GQA_EXP_FP16_PATH", 0);
+    // 3 = grouped kernel with fp16-read / fp32-accumulate tile kernels (FCVTL widen), 4 = the same with FEAT_FHM FMLAL;
+    // tasks above ORT_GQA_EXP_HALF_MAX_ROWS query rows (prefill) keep the fp32-tile SGEMM path.
+    exp_half_max_rows_ = ParseEnvironmentVariableWithDefault<int>("ORT_GQA_EXP_HALF_MAX_ROWS", 16);
 
     SetupMlasBackendKernelSelectorFromConfigOptions(mlas_backend_kernel_selector_config_, info.GetConfigOptions());
   }
@@ -139,6 +142,7 @@ class GQAAttentionBase {
   bool kv_quant_enabled_;
   bool disable_gqa_flash_;
   int exp_fp16_path_ = 0;
+  int exp_half_max_rows_ = 16;
 
   // Resolves the per-batch geometry of one step from seqlens_k (total length - 1) and the step type:
   //   past_seqlen:        past rows copied from the past cache into the present cache,
@@ -1387,7 +1391,7 @@ class GQAAttentionBase {
     if constexpr (std::is_same_v<T, MLFloat16>) {
       // Where MLAS has fp16 GEMMs (ARM64 with fp16 arithmetic), the per-head path keeps fp16 caches in fp16, which is
       // faster there than the grouped kernel's fp32 tiles, though less accurate.
-      if (exp_fp16_path_ != 1 &&
+      if (exp_fp16_path_ != 1 && exp_fp16_path_ != 3 && exp_fp16_path_ != 4 &&
           MlasGQASupported<T>(CblasNoTrans, CblasTrans) && MlasGQASupported<T>(CblasNoTrans, CblasNoTrans)) {
         return false;
       }
@@ -1505,6 +1509,10 @@ class GQAAttentionBase {
     args.use_sink = use_smooth_softmax_ || head_sink != nullptr;
     args.head_sink = head_sink;
     args.mlas_config = &mlas_backend_kernel_selector_config_;
+    if constexpr (std::is_same_v<T, MLFloat16>) {
+      args.half_kernels = exp_fp16_path_ == 3 ? 1 : exp_fp16_path_ == 4 ? 2 : 0;
+      args.half_max_rows = exp_half_max_rows_;
+    }
     return RunGroupedFlashAttention(args, allocator, tp);
   }
 

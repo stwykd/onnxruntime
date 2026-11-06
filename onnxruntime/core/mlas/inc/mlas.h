@@ -1813,6 +1813,18 @@ MlasHGemmSupported(
 /**
  * @brief Check whether mlas supports GQA kernels with the type and transpose settings.
  */
+// Experimental (arm-fp16-exp): attention tile products that read fp16 B rows and accumulate in fp32. ARM64 Linux
+// only (halfattn_kernel_neon_*.cpp). QK: C[r, k] = alpha * dot(A[r, :D], B[k, :D]), D % 8 == 0. PV: C[r, :Ncols] +=
+// sum_j A[r, j] * B[j, :Ncols], Ncols % 16 == 0. The Fhm variants (FEAT_FHM FMLAL/FMLAL2) take fp16 A too.
+void MLASCALL MlasHalfAttnQK(size_t M, size_t N, size_t D, float alpha, const float* A, size_t lda, const MLAS_FP16* B,
+                             size_t ldb, float* C, size_t ldc);
+void MLASCALL MlasHalfAttnPV(size_t M, size_t Ncols, size_t K, const float* A, size_t lda, const MLAS_FP16* B,
+                             size_t ldb, float* C, size_t ldc);
+void MLASCALL MlasHalfAttnQKFhm(size_t M, size_t N, size_t D, float alpha, const MLAS_FP16* A, size_t lda,
+                                const MLAS_FP16* B, size_t ldb, float* C, size_t ldc);
+void MLASCALL MlasHalfAttnPVFhm(size_t M, size_t Ncols, size_t K, const MLAS_FP16* A, size_t lda, const MLAS_FP16* B,
+                                size_t ldb, float* C, size_t ldc);
+
 template <typename T>
 bool
 MLASCALL

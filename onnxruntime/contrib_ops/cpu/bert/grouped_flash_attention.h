@@ -73,6 +73,12 @@ struct GroupedFlashAttentionArgs {
   const T* head_sink = nullptr;
 
   const MLAS_BACKEND_KERNEL_SELECTOR_CONFIG* mlas_config = nullptr;
+
+  // Experimental (arm-fp16-exp), fp16 caches on ARM64 Linux: tasks of at most half_max_rows query rows read the cache
+  // tiles in fp16 and accumulate in fp32 (1 = FCVTL widen + FMLA, 2 = FEAT_FHM FMLAL, falls back to 1 without FHM)
+  // instead of converting each tile to fp32 for SGEMM. 0 = off.
+  int half_kernels = 0;
+  int half_max_rows = 16;
 };
 
 // Runs the attention with all query heads of a kv head stacked as the rows of one GEMM against each cache tile, so a

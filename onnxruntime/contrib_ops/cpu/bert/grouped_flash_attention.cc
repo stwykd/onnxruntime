@@ -9,6 +9,10 @@
 #include <cstring>
 #include <limits>
 #include <type_traits>
+#if defined(__aarch64__) && defined(__linux__)
+#include <asm/hwcap.h>
+#include <sys/auxv.h>
+#endif
 
 #include "core/common/common.h"
 #include "core/common/safeint.h"
@@ -25,6 +29,16 @@ constexpr std::ptrdiff_t kSubBlockRows = 128;       // query rows, (token, head)
 constexpr std::ptrdiff_t kMaxSubBlocksPerTask = 8;  // GEMM row blocks sharing each loaded tile, at most
 constexpr std::ptrdiff_t kMinKvChunk = 512;         // cached rows per split of the cache, at least
 constexpr float kLowest = std::numeric_limits<float>::lowest();
+
+#if defined(MLAS_TARGET_ARM64) && defined(MLAS_F16VEC_INTRINSICS_SUPPORTED) && defined(__linux__) && !defined(__APPLE__)
+#define ORT_GQA_HALFATTN 1
+bool HalfAttnFhmAvailable() {
+  static const bool available = (getauxval(AT_HWCAP) & HWCAP_ASIMDFHM) != 0;
+  return available;
+}
+#else
+#define ORT_GQA_HALFATTN 0
+#endif
 
 inline std::ptrdiff_t CeilDiv(std::ptrdiff_t a, std::ptrdiff_t b) { return (a + b - 1) / b; }
 
@@ -197,7 +211,13 @@ class GroupedAttention {
       LoadRows(q, args_.q_head_stride, group, head_size,
                w.q + static_cast<size_t>((s - s_begin) * group) * head_size);
     }
-    if (!pack_k_) {
+    const int half = HalfKernels(rows);
+    [[maybe_unused]] MLAS_FP16* q16 = reinterpret_cast<MLAS_FP16*>(w.k);  // half mode leaves w.k and w.v unused
+    [[maybe_unused]] MLAS_FP16* p16 = reinterpret_cast<MLAS_FP16*>(w.v);
+    if (half == 2) {
+      MlasConvertFloatToHalfBuffer(w.q, q16, static_cast<size_t>(rows) * head_size);  // exact: w.q came from fp16
+    }
+    if (!pack_k_ && half == 0) {
       // The unpacked Q*K' GEMM takes alpha = 1, so a one-row block reaches MLAS's single-row kernel.
       const size_t q_count = static_cast<size_t>(rows) * head_size;
       for (size_t i = 0; i < q_count; ++i) w.q[i] *= args_.scale;
@@ -228,13 +248,15 @@ class GroupedAttention {
 
       // Copying (or converting) the tile first reads the cache sequentially. Packing straight from the cache reads it
       // in strided column panels, which is several times slower on some ARM64 cores.
+      if (half == 0) {
       LoadRows(key + static_cast<size_t>(tile_begin) * args_.k_row_stride, args_.k_row_stride, n, head_size, w.k);
       LoadRows(value + static_cast<size_t>(tile_begin) * args_.v_row_stride, args_.v_row_stride, n, v_head_size, w.v);
-      if (pack_k_) {
+      }
+      if (half == 0 && pack_k_) {
         MlasGemmPackB(CblasNoTrans, CblasTrans, static_cast<size_t>(n), head_size, w.k, head_size, w.packed_k,
                       args_.mlas_config);
       }
-      if (pack_v_) {
+      if (half == 0 && pack_v_) {
         MlasGemmPackB(CblasNoTrans, CblasNoTrans, v_head_size, static_cast<size_t>(n), w.v, v_head_size, w.packed_v,
                       args_.mlas_config);
       }
@@ -245,7 +267,23 @@ class GroupedAttention {
         const std::ptrdiff_t r0 = (t0 - s_begin) * group;
         const std::ptrdiff_t sub_rows = (t1 - t0) * group;
         const float* q = w.q + static_cast<size_t>(r0) * head_size;
-        if (pack_k_) {
+#if ORT_GQA_HALFATTN
+        if constexpr (!std::is_same_v<T, float>) {
+          if (half != 0) {
+            const auto* k16 = reinterpret_cast<const MLAS_FP16*>(key + static_cast<size_t>(tile_begin) * args_.k_row_stride);
+            if (half == 2) {
+              MlasHalfAttnQKFhm(static_cast<size_t>(sub_rows), static_cast<size_t>(n), head_size, args_.scale,
+                                q16 + static_cast<size_t>(r0) * head_size, head_size, k16, args_.k_row_stride, w.scores,
+                                static_cast<size_t>(n));
+            } else {
+              MlasHalfAttnQK(static_cast<size_t>(sub_rows), static_cast<size_t>(n), head_size, args_.scale, q,
+                             head_size, k16, args_.k_row_stride, w.scores, static_cast<size_t>(n));
+            }
+          }
+        }
+#endif
+        if (half != 0) {
+        } else if (pack_k_) {
           MlasGemm(CblasNoTrans, static_cast<size_t>(sub_rows), static_cast<size_t>(n), head_size, args_.scale, q,
                    head_size, w.packed_k, 0.0f, w.scores, static_cast<size_t>(n), nullptr, args_.mlas_config);
         } else {
@@ -297,7 +335,24 @@ class GroupedAttention {
         }
 
         float* out = acc + static_cast<size_t>(r0) * v_head_size;
-        if (pack_v_) {
+#if ORT_GQA_HALFATTN
+        if constexpr (!std::is_same_v<T, float>) {
+          if (half != 0) {
+            const auto* v16 =
+                reinterpret_cast<const MLAS_FP16*>(value + static_cast<size_t>(tile_begin) * args_.v_row_stride);
+            if (half == 2) {
+              MlasConvertFloatToHalfBuffer(w.scores, p16, static_cast<size_t>(sub_rows) * n);
+              MlasHalfAttnPVFhm(static_cast<size_t>(sub_rows), v_head_size, static_cast<size_t>(n), p16,
+                                static_cast<size_t>(n), v16, args_.v_row_stride, out, v_head_size);
+            } else {
+              MlasHalfAttnPV(static_cast<size_t>(sub_rows), v_head_size, static_cast<size_t>(n), w.scores,
+                             static_cast<size_t>(n), v16, args_.v_row_stride, out, v_head_size);
+            }
+          }
+        }
+#endif
+        if (half != 0) {
+        } else if (pack_v_) {
           MlasGemm(CblasNoTrans, static_cast<size_t>(sub_rows), v_head_size, static_cast<size_t>(n), 1.0f, w.scores,
                    static_cast<size_t>(n), w.packed_v, 1.0f, out, v_head_size, nullptr, args_.mlas_config);
         } else {
@@ -307,6 +362,22 @@ class GroupedAttention {
         }
       }
     }
+  }
+
+  // 0, or which fp16-read / fp32-accumulate tile kernels (1 widen, 2 FHM) a task of `rows` query rows uses.
+  int HalfKernels(std::ptrdiff_t rows) const {
+#if ORT_GQA_HALFATTN
+    if constexpr (!std::is_same_v<T, float>) {
+      if (args_.half_kernels != 0 && rows <= args_.half_max_rows && args_.head_size % 8 == 0 &&
+          args_.v_head_size % 16 == 0) {
+        // The FHM kernels take fp16 Q and P, staged in the (then unused) fp32 K and V tile buffers.
+        const bool fhm_fits = rows <= 2 * kKvTile && plan_.sub_tokens * plan_.group_size <= 2 * args_.v_head_size;
+        return args_.half_kernels == 2 && HalfAttnFhmAvailable() && fhm_fits ? 2 : 1;
+      }
+    }
+#endif
+    ORT_UNUSED_PARAMETER(rows);
+    return 0;
   }
 
   // Normalizes the rows of acc in place, folding in the head sink, and writes them to the output.
